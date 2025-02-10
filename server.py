@@ -8,35 +8,12 @@ from aiohttp import web
 from aiohttp_middlewares import cors_middleware
 import aiofiles
 import uuid
-from dataclasses import dataclass, asdict
-from collections import defaultdict
-from typing import Dict, Set, Optional
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-@dataclass
-class VoiceParticipant:
-    username: str
-    avatar: str
-    client_id: str
-
-class VoiceManager:
-    def __init__(self):
-        self.participants: Dict[str, VoiceParticipant] = {}
-    
-    def add_participant(self, username: str, avatar: str, client_id: str):
-        self.participants[client_id] = VoiceParticipant(username, avatar, client_id)
-    
-    def remove_participant(self, client_id: str):
-        if client_id in self.participants:
-            del self.participants[client_id]
-    
-    def get_participants(self):
-        return [asdict(p) for p in self.participants.values()]
 
 class FileStorageManager:
     def __init__(self):
@@ -133,7 +110,6 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections = {}
         self.db = FileStorageManager()
-        self.voice_manager = VoiceManager()
 
     async def connect(self, websocket: web.WebSocketResponse, client_id: str, ip_address: str):
         try:
@@ -206,51 +182,6 @@ class ConnectionManager:
             
             logger.info(f"Client {client_id} updated profile: {new_username}")
 
-    async def handle_voice_message(self, client_id: str, message_type: str, data: dict):
-        if message_type == 'voice_join':
-            self.voice_manager.add_participant(
-                data['username'],
-                data['avatar'],
-                client_id
-            )
-            await self.broadcast({
-                'type': 'voice_participants',
-                'participants': self.voice_manager.get_participants()
-            })
-            
-            # Send ICE candidates and SDP offers to new participant
-            if len(self.voice_manager.participants) > 1:
-                await self._broadcast_to_others({
-                    'type': 'voice_peer_joined',
-                    'username': data['username'],
-                    'client_id': client_id
-                }, client_id)
-        
-        elif message_type == 'voice_leave':
-            self.voice_manager.remove_participant(client_id)
-            await self.broadcast({
-                'type': 'voice_participants',
-                'participants': self.voice_manager.get_participants()
-            })
-            
-            await self._broadcast_to_others({
-                'type': 'voice_peer_left',
-                'client_id': client_id
-            }, client_id)
-
-    async def handle_webrtc_message(self, client_id: str, data: dict):
-        target_client_id = data.get('target')
-        if target_client_id in self.active_connections:
-            try:
-                await self.active_connections[target_client_id]['websocket'].send_json({
-                    'type': data['type'],
-                    'sender': client_id,
-                    'sdp': data.get('sdp'),
-                    'candidate': data.get('candidate')
-                })
-            except Exception as e:
-                logger.error(f"Error sending WebRTC message: {e}")
-
     async def _broadcast_to_others(self, message: dict, sender_id: str = None):
         for client_id, client in list(self.active_connections.items()):
             if client_id != sender_id:
@@ -297,12 +228,6 @@ async def websocket_handler(request):
             for msg in recent_messages:
                 await ws.send_json(msg)
         
-        # Send current voice participants list
-        await ws.send_json({
-            'type': 'voice_participants',
-            'participants': manager.voice_manager.get_participants()
-        })
-        
         await manager._broadcast_to_others({
             'type': 'user_joined',
             'username': manager.active_connections[client_id]['username']
@@ -323,14 +248,6 @@ async def websocket_handler(request):
                             data['username'],
                             data['avatar']
                         )
-                        continue
-                    
-                    if data['type'] in ['voice_join', 'voice_leave']:
-                        await manager.handle_voice_message(client_id, data['type'], data)
-                        continue
-                    
-                    if data['type'] in ['offer', 'answer', 'ice-candidate']:
-                        await manager.handle_webrtc_message(client_id, data)
                         continue
                         
                     if data['type'] == 'message':
@@ -365,7 +282,6 @@ async def websocket_handler(request):
         logger.error(f"WebSocket handler error: {e}")
     finally:
         await manager.disconnect(client_id)
-        manager.voice_manager.remove_participant(client_id)
         
     return ws
 
@@ -391,319 +307,11 @@ async def init_app():
     storage_path.mkdir(exist_ok=True)
     
     app['connection_manager'] = ConnectionManager()
-    app['voice_manager'] = VoiceManager()
     
     app.router.add_get('/', handle_index)
     app.router.add_get('/ws/{client_id}', websocket_handler)
-    app.router.add_post('/voice/offer', handle_offer)
-    app.router.add_post('/voice/answer', handle_answer)
-    app.router.add_post('/voice/ice-candidate', handle_ice_candidate)
     
     return app
-
-class VoiceManager:
-    def __init__(self):
-        self.voice_rooms = defaultdict(set)
-        self.client_rooms = {}
-        self.voice_states = {}
-
-    def join_voice(self, client_id: str, room_id: str = "default"):
-        self.voice_rooms[room_id].add(client_id)
-        self.client_rooms[client_id] = room_id
-        self.voice_states[client_id] = {
-            "muted": False,
-            "deafened": False,
-            "speaking": False
-        }
-
-    def leave_voice(self, client_id: str):
-        if client_id in self.client_rooms:
-            room_id = self.client_rooms[client_id]
-            self.voice_rooms[room_id].discard(client_id)
-            if not self.voice_rooms[room_id]:
-                del self.voice_rooms[room_id]
-            del self.client_rooms[client_id]
-            if client_id in self.voice_states:
-                del self.voice_states[client_id]
-
-    def get_room_participants(self, room_id: str) -> Set[str]:
-        return self.voice_rooms.get(room_id, set())
-
-    def get_client_room(self, client_id: str) -> Optional[str]:
-        return self.client_rooms.get(client_id)
-
-    def update_voice_state(self, client_id: str, state: dict):
-        if client_id in self.voice_states:
-            self.voice_states[client_id].update(state)
-
-    def get_voice_state(self, client_id: str) -> dict:
-        return self.voice_states.get(client_id, {})
-
-async def handle_offer(request):
-    data = await request.json()
-    manager = request.app['connection_manager']
-    voice_manager = request.app['voice_manager']
-    
-    from_client = data['from']
-    to_client = data['to']
-    offer = data['offer']
-    room_id = voice_manager.get_client_room(from_client)
-    
-    if not room_id or to_client not in voice_manager.get_room_participants(room_id):
-        raise web.HTTPBadRequest(text="Invalid voice session")
-    
-    try:
-        await manager.send_to_client(to_client, {
-            'type': 'voice_offer',
-            'from': from_client,
-            'offer': offer
-        })
-        return web.Response(text="Offer forwarded")
-    except Exception as e:
-        logger.error(f"Error handling offer: {e}")
-        raise web.HTTPInternalServerError(text="Failed to forward offer")
-
-async def handle_answer(request):
-    data = await request.json()
-    manager = request.app['connection_manager']
-    voice_manager = request.app['voice_manager']
-    
-    from_client = data['from']
-    to_client = data['to']
-    answer = data['answer']
-    room_id = voice_manager.get_client_room(from_client)
-    
-    if not room_id or to_client not in voice_manager.get_room_participants(room_id):
-        raise web.HTTPBadRequest(text="Invalid voice session")
-    
-    try:
-        await manager.send_to_client(to_client, {
-            'type': 'voice_answer',
-            'from': from_client,
-            'answer': answer
-        })
-        return web.Response(text="Answer forwarded")
-    except Exception as e:
-        logger.error(f"Error handling answer: {e}")
-        raise web.HTTPInternalServerError(text="Failed to forward answer")
-
-async def handle_ice_candidate(request):
-    data = await request.json()
-    manager = request.app['connection_manager']
-    voice_manager = request.app['voice_manager']
-    
-    from_client = data['from']
-    to_client = data['to']
-    candidate = data['candidate']
-    room_id = voice_manager.get_client_room(from_client)
-    
-    if not room_id or to_client not in voice_manager.get_room_participants(room_id):
-        raise web.HTTPBadRequest(text="Invalid voice session")
-    
-    try:
-        await manager.send_to_client(to_client, {
-            'type': 'ice_candidate',
-            'from': from_client,
-            'candidate': candidate
-        })
-        return web.Response(text="ICE candidate forwarded")
-    except Exception as e:
-        logger.error(f"Error handling ICE candidate: {e}")
-        raise web.HTTPInternalServerError(text="Failed to forward ICE candidate")
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections = {}
-        self.db = FileStorageManager()
-        self.voice_manager = VoiceManager()
-
-    async def connect(self, websocket: web.WebSocketResponse, client_id: str, ip_address: str):
-        try:
-            profile = await self.db.get_user_profile(ip_address)
-            
-            if profile:
-                username = profile['username']
-                avatar = profile['avatar']
-            else:
-                username = f"User-{client_id[:8]}"
-                avatar = f"https://api.dicebear.com/6.x/avataaars/svg?seed={client_id}"
-                await self.db.save_user_profile(ip_address, username, avatar)
-
-            self.active_connections[client_id] = {
-                'websocket': websocket,
-                'username': username,
-                'avatar': avatar,
-                'ip_address': ip_address,
-                'last_pong': datetime.now()
-            }
-            
-            logger.info(f"Client {client_id} connected from {ip_address}")
-
-        except Exception as e:
-            logger.error(f"Error in connect: {e}")
-            raise
-
-    async def disconnect(self, client_id: str):
-        if client_id in self.active_connections:
-            self.voice_manager.leave_voice(client_id)
-            
-            # Notify others in the same voice room
-            room_id = self.voice_manager.get_client_room(client_id)
-            if room_id:
-                await self.broadcast_to_room(room_id, {
-                    'type': 'voice_peer_disconnected',
-                    'client_id': client_id
-                }, exclude_client=client_id)
-            
-            disconnected_user = self.active_connections[client_id]['username']
-            await self._broadcast_to_others({
-                'type': 'user_left',
-                'username': disconnected_user
-            }, client_id)
-            
-            del self.active_connections[client_id]
-            logger.info(f"Client {client_id} disconnected")
-
-    async def send_to_client(self, client_id: str, message: dict):
-        if client_id in self.active_connections:
-            try:
-                await self.active_connections[client_id]['websocket'].send_json(message)
-            except Exception as e:
-                logger.error(f"Error sending to client {client_id}: {e}")
-                await self.disconnect(client_id)
-
-    async def broadcast_to_room(self, room_id: str, message: dict, exclude_client: str = None):
-        participants = self.voice_manager.get_room_participants(room_id)
-        for client_id in participants:
-            if client_id != exclude_client:
-                await self.send_to_client(client_id, message)
-
-    async def handle_voice_message(self, client_id: str, message_type: str, data: dict):
-        if message_type == 'voice_join':
-            room_id = data.get('room_id', 'default')
-            self.voice_manager.join_voice(client_id, room_id)
-            
-            # Notify existing participants
-            participants = self.voice_manager.get_room_participants(room_id)
-            for participant_id in participants:
-                if participant_id != client_id:
-                    await self.send_to_client(participant_id, {
-                        'type': 'voice_peer_joined',
-                        'client_id': client_id,
-                        'username': self.active_connections[client_id]['username'],
-                        'avatar': self.active_connections[client_id]['avatar']
-                    })
-            
-            # Send list of existing participants to new user
-            await self.send_to_client(client_id, {
-                'type': 'voice_participants',
-                'participants': [
-                    {
-                        'client_id': p_id,
-                        'username': self.active_connections[p_id]['username'],
-                        'avatar': self.active_connections[p_id]['avatar'],
-                        'state': self.voice_manager.get_voice_state(p_id)
-                    }
-                    for p_id in participants if p_id != client_id
-                ]
-            })
-            
-        elif message_type == 'voice_leave':
-            room_id = self.voice_manager.get_client_room(client_id)
-            if room_id:
-                self.voice_manager.leave_voice(client_id)
-                await self.broadcast_to_room(room_id, {
-                    'type': 'voice_peer_left',
-                    'client_id': client_id
-                }, exclude_client=client_id)
-        
-        elif message_type == 'voice_state_update':
-            self.voice_manager.update_voice_state(client_id, data.get('state', {}))
-            room_id = self.voice_manager.get_client_room(client_id)
-            if room_id:
-                await self.broadcast_to_room(room_id, {
-                    'type': 'voice_state_update',
-                    'client_id': client_id,
-                    'state': self.voice_manager.get_voice_state(client_id)
-                }, exclude_client=client_id)
-
-async def websocket_handler(request):
-    ws = web.WebSocketResponse(heartbeat=30)
-    await ws.prepare(request)
-    
-    client_id = request.match_info['client_id']
-    manager = request.app['connection_manager']
-    
-    try:
-        real_ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or \
-                  request.headers.get('X-Real-IP', '') or \
-                  request.remote or \
-                  '127.0.0.1'
-                  
-        await manager.connect(ws, client_id, real_ip)
-        
-        recent_messages = await manager.db.get_recent_messages(current_ip=real_ip)
-        if recent_messages:
-            for msg in recent_messages:
-                await ws.send_json(msg)
-        
-        async for msg in ws:
-            if msg.type == web.WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    
-                    if data['type'] in ['voice_join', 'voice_leave', 'voice_state_update']:
-                        await manager.handle_voice_message(client_id, data['type'], data)
-                        continue
-                    
-                    # Handle other message types (existing chat functionality)
-                    await handle_message(manager, client_id, data, real_ip)
-                    
-                except json.JSONDecodeError:
-                    logger.warning(f"Invalid JSON from client {client_id}")
-                except Exception as e:
-                    logger.error(f"Message processing error: {e}")
-                    
-            elif msg.type == web.WSMsgType.ERROR:
-                logger.error(f'WebSocket error: {ws.exception()}')
-                
-    except Exception as e:
-        logger.error(f"WebSocket handler error: {e}")
-    finally:
-        await manager.disconnect(client_id)
-        
-    return ws
-
-async def handle_message(manager: ConnectionManager, client_id: str, data: dict, real_ip: str):
-    if data['type'] == 'ping':
-        await manager.handle_ping(client_id)
-    
-    elif data['type'] == 'update_profile':
-        await manager.update_profile(
-            client_id,
-            data['username'],
-            data['avatar']
-        )
-    
-    elif data['type'] == 'message':
-        content = data.get('content', '').strip()
-        if not content:
-            return
-
-        timestamp = await manager.db.save_message(
-            manager.active_connections[client_id]['username'],
-            manager.active_connections[client_id]['avatar'],
-            content,
-            real_ip
-        )
-        
-        await manager.broadcast({
-            'type': 'message',
-            'username': manager.active_connections[client_id]['username'],
-            'avatar': manager.active_connections[client_id]['avatar'],
-            'content': content,
-            'timestamp': timestamp
-        }, client_id)
 
 def main():
     port = int(os.environ.get('PORT', 8001))
