@@ -1,12 +1,13 @@
 import asyncio
 import json
-import sqlite3
-from datetime import datetime
 import logging
+from datetime import datetime
 from pathlib import Path
+import os
 from aiohttp import web
 from aiohttp_middlewares import cors_middleware
-import os
+import aiofiles
+import uuid
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,124 +15,100 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class DatabaseManager:
-    def __init__(self, db_path='chat.db'):
-        self.db_path = db_path
-        self._init_db()
+class FileStorageManager:
+    def __init__(self):
+        self.base_path = Path(os.environ.get('STORAGE_PATH', 'data'))
+        self.messages_file = self.base_path / 'messages.json'
+        self.users_file = self.base_path / 'users.json'
+        self._init_storage()
 
-    def _init_db(self):
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            
-            c.execute('''CREATE TABLE IF NOT EXISTS messages
-                        (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT NOT NULL,
-                        avatar TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        ip_address TEXT)''')
-            
-            c.execute('''CREATE TABLE IF NOT EXISTS users
-                        (ip_address TEXT PRIMARY KEY,
-                        username TEXT NOT NULL,
-                        avatar TEXT NOT NULL,
-                        last_seen TEXT NOT NULL)''')
-            
-            conn.commit()
-            
-            c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = c.fetchall()
-            logger.info(f"Database tables: {tables}")
-        finally:
-            if 'conn' in locals():
-                conn.close()
+    def _init_storage(self):
+        self.base_path.mkdir(exist_ok=True)
+        if not self.messages_file.exists():
+            self._write_json(self.messages_file, [])
+        if not self.users_file.exists():
+            self._write_json(self.users_file, {})
 
-    def get_user_profile(self, ip_address: str) -> dict:
+    def _read_json(self, file_path: Path) -> dict:
         try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('SELECT username, avatar FROM users WHERE ip_address = ?', (ip_address,))
-            result = c.fetchone()
-            
-            if result:
-                return {
-                    'username': result[0],
-                    'avatar': result[1]
-                }
-            return None
-        except sqlite3.Error as e:
-            logger.error(f"Error getting user profile: {e}")
-            return None
-        finally:
-            if 'conn' in locals():
-                conn.close()
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {} if file_path == self.users_file else []
+        except json.JSONDecodeError:
+            logger.error(f"Error reading {file_path}. Initializing as empty.")
+            return {} if file_path == self.users_file else []
 
-    def save_user_profile(self, ip_address: str, username: str, avatar: str):
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('''INSERT OR REPLACE INTO users 
-                        (ip_address, username, avatar, last_seen)
-                        VALUES (?, ?, ?, ?)''',
-                     (ip_address, username, avatar, datetime.now().isoformat()))
-            conn.commit()
-        except sqlite3.Error as e:
-            logger.error(f"Error saving user profile: {e}")
-            raise
-        finally:
-            if 'conn' in locals():
-                conn.close()
+    def _write_json(self, file_path: Path, data: dict):
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=2)
 
-    def save_message(self, username: str, avatar: str, content: str, ip_address: str) -> str:
+    async def _async_read_json(self, file_path: Path) -> dict:
         try:
-            conn = sqlite3.connect(self.db_path)
-            timestamp = datetime.now().isoformat()
-            c = conn.cursor()
-            logger.info(f"Saving message with IP {ip_address}")
-            
-            c.execute('''INSERT INTO messages 
-                        (username, avatar, content, timestamp, ip_address)
-                        VALUES (?, ?, ?, ?, ?)''',
-                    (username, avatar, content, timestamp, ip_address))
-            conn.commit()
-            return timestamp
-        finally:
-            conn.close()
+            async with aiofiles.open(file_path, 'r') as f:
+                content = await f.read()
+                return json.loads(content)
+        except FileNotFoundError:
+            return {} if file_path == self.users_file else []
+        except json.JSONDecodeError:
+            logger.error(f"Error reading {file_path}. Initializing as empty.")
+            return {} if file_path == self.users_file else []
 
-    def get_recent_messages(self, limit: int = 50, current_ip: str = None) -> list:
-        try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            logger.info(f"Loading messages for IP {current_ip}")
+    async def _async_write_json(self, file_path: Path, data: dict):
+        async with aiofiles.open(file_path, 'w') as f:
+            await f.write(json.dumps(data, indent=2))
+
+    async def get_user_profile(self, ip_address: str) -> dict:
+        users = await self._async_read_json(self.users_file)
+        return users.get(ip_address)
+
+    async def save_user_profile(self, ip_address: str, username: str, avatar: str):
+        users = await self._async_read_json(self.users_file)
+        users[ip_address] = {
+            'username': username,
+            'avatar': avatar,
+            'last_seen': datetime.now().isoformat()
+        }
+        await self._async_write_json(self.users_file, users)
+
+    async def save_message(self, username: str, avatar: str, content: str, ip_address: str) -> str:
+        messages = await self._async_read_json(self.messages_file)
+        timestamp = datetime.now().isoformat()
+        
+        message = {
+            'id': str(uuid.uuid4()),
+            'username': username,
+            'avatar': avatar,
+            'content': content,
+            'timestamp': timestamp,
+            'ip_address': ip_address
+        }
+        
+        messages.append(message)
+        if len(messages) > 1000:
+            messages = messages[-1000:]
             
-            c.execute('''SELECT username, avatar, content, timestamp, ip_address 
-                        FROM messages ORDER BY id DESC LIMIT ?''', (limit,))
-                        
-            messages = []
-            for row in c.fetchall():
-                stored_ip = str(row[4]).strip()
-                current_ip = str(current_ip).strip()
-                
-                messages.append({
-                    "type": "message",
-                    "username": row[0],
-                    "avatar": row[1],
-                    "content": row[2],
-                    "timestamp": row[3],
-                    "is_own_message": stored_ip == current_ip,
-                    "ip_address": stored_ip
-                })
-                
-            logger.info(f"Loaded {len(messages)} messages")
-            return messages[::-1]
-        finally:
-            conn.close()
+        await self._async_write_json(self.messages_file, messages)
+        return timestamp
+
+    async def get_recent_messages(self, limit: int = 50, current_ip: str = None) -> list:
+        messages = await self._async_read_json(self.messages_file)
+        recent_messages = messages[-limit:]
+        
+        return [{
+            "type": "message",
+            "username": msg['username'],
+            "avatar": msg['avatar'],
+            "content": msg['content'],
+            "timestamp": msg['timestamp'],
+            "is_own_message": str(msg['ip_address']) == str(current_ip),
+            "ip_address": msg['ip_address']
+        } for msg in recent_messages]
 
 class ConnectionManager:
     def __init__(self):
         self.active_connections = {}
-        self.db = DatabaseManager()
+        self.db = FileStorageManager()
 
     async def connect(self, websocket: web.WebSocketResponse, client_id: str, ip_address: str):
         try:
@@ -325,6 +302,9 @@ async def init_app():
     ])
     
     app['forwarded_allow_ips'] = '*'
+
+    storage_path = Path(os.environ.get('STORAGE_PATH', 'data'))
+    storage_path.mkdir(exist_ok=True)
     
     app['connection_manager'] = ConnectionManager()
     
@@ -334,8 +314,12 @@ async def init_app():
     return app
 
 def main():
-    app = asyncio.run(init_app())
     port = int(os.environ.get('PORT', 8001))
+
+    storage_path = Path(os.environ.get('STORAGE_PATH', 'data'))
+    storage_path.mkdir(exist_ok=True)
+    
+    app = asyncio.run(init_app())
     web.run_app(app, host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
