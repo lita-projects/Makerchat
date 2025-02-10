@@ -24,6 +24,7 @@ class FileStorageManager:
 
     def _init_storage(self):
         self.base_path.mkdir(exist_ok=True)
+        
         if not self.messages_file.exists():
             self._write_json(self.messages_file, [])
         if not self.users_file.exists():
@@ -112,7 +113,7 @@ class ConnectionManager:
 
     async def connect(self, websocket: web.WebSocketResponse, client_id: str, ip_address: str):
         try:
-            profile = self.db.get_user_profile(ip_address)
+            profile = await self.db.get_user_profile(ip_address)
             
             if profile:
                 username = profile['username']
@@ -121,7 +122,7 @@ class ConnectionManager:
                 username = f"User-{client_id[:8]}"
                 avatar = f"https://api.dicebear.com/6.x/avataaars/svg?seed={client_id}"
                 try:
-                    self.db.save_user_profile(ip_address, username, avatar)
+                    await self.db.save_user_profile(ip_address, username, avatar)
                 except Exception as e:
                     logger.error(f"Error saving new user profile: {e}")
 
@@ -158,7 +159,7 @@ class ConnectionManager:
             connection['avatar'] = new_avatar
             
             try:
-                self.db.save_user_profile(
+                await self.db.save_user_profile(
                     connection['ip_address'],
                     new_username,
                     new_avatar
@@ -222,10 +223,9 @@ async def websocket_handler(request):
                  
         await manager.connect(ws, client_id, real_ip)
         
-        recent_messages = manager.db.get_recent_messages(current_ip=real_ip)
+        recent_messages = await manager.db.get_recent_messages(current_ip=real_ip)
         if recent_messages:
             for msg in recent_messages:
-                msg['is_own_message'] = str(msg.get('ip_address')) == str(real_ip)
                 await ws.send_json(msg)
         
         await manager._broadcast_to_others({
@@ -255,7 +255,7 @@ async def websocket_handler(request):
                         if not content:
                             continue
 
-                        timestamp = manager.db.save_message(
+                        timestamp = await manager.db.save_message(
                             manager.active_connections[client_id]['username'],
                             manager.active_connections[client_id]['avatar'],
                             content,
@@ -302,7 +302,7 @@ async def init_app():
     ])
     
     app['forwarded_allow_ips'] = '*'
-
+    
     storage_path = Path(os.environ.get('STORAGE_PATH', 'data'))
     storage_path.mkdir(exist_ok=True)
     
@@ -315,7 +315,7 @@ async def init_app():
 
 def main():
     port = int(os.environ.get('PORT', 8001))
-
+    
     storage_path = Path(os.environ.get('STORAGE_PATH', 'data'))
     storage_path.mkdir(exist_ok=True)
     
