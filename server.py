@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import aiosqlite
 from datetime import datetime
 from pathlib import Path
 import os
@@ -9,36 +10,69 @@ from aiohttp_middlewares import cors_middleware
 import aiofiles
 import uuid
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+class DatabaseManager:
+    def __init__(self):
+        self.db_path = Path('data/chat.db')
+        self.db_path.parent.mkdir(exist_ok=True)
+        
+    async def init_db(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS messages (
+                    id TEXT PRIMARY KEY,
+                    username TEXT,
+                    avatar TEXT,
+                    content TEXT,
+                    timestamp TEXT,
+                    ip_address TEXT
+                )
+            ''')
+            await db.commit()
+
+    async def save_message(self, msg_id: str, username: str, avatar: str, content: str, timestamp: str, ip_address: str):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)',
+                (msg_id, username, avatar, content, timestamp, ip_address)
+            )
+            await db.commit()
+
+    async def get_recent_messages(self, limit: int = 50):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                'SELECT * FROM messages ORDER BY timestamp DESC LIMIT ?',
+                (limit,)
+            ) as cursor:
+                messages = await cursor.fetchall()
+                return [
+                    {
+                        "id": msg[0],
+                        "username": msg[1],
+                        "avatar": msg[2],
+                        "content": msg[3],
+                        "timestamp": msg[4],
+                        "ip_address": msg[5]
+                    }
+                    for msg in reversed(messages)
+                ]
 
 class FileStorageManager:
     def __init__(self):
         self.base_path = Path(os.environ.get('STORAGE_PATH', 'data'))
-        self.messages_file = self.base_path / 'messages.json'
         self.users_file = self.base_path / 'users.json'
+        self.db = DatabaseManager()
         self._init_storage()
 
     def _init_storage(self):
         self.base_path.mkdir(exist_ok=True)
-        
-        if not self.messages_file.exists():
-            self._write_json(self.messages_file, [])
         if not self.users_file.exists():
             self._write_json(self.users_file, {})
 
-    def _read_json(self, file_path: Path) -> dict:
-        try:
-            with open(file_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {} if file_path == self.users_file else []
-        except json.JSONDecodeError:
-            logger.error(f"Error reading {file_path}. Initializing as empty.")
-            return {} if file_path == self.users_file else []
+    async def init(self):
+        await self.db.init_db()
 
     def _write_json(self, file_path: Path, data: dict):
         with open(file_path, 'w') as f:
@@ -50,10 +84,10 @@ class FileStorageManager:
                 content = await f.read()
                 return json.loads(content)
         except FileNotFoundError:
-            return {} if file_path == self.users_file else []
+            return {}
         except json.JSONDecodeError:
             logger.error(f"Error reading {file_path}. Initializing as empty.")
-            return {} if file_path == self.users_file else []
+            return {}
 
     async def _async_write_json(self, file_path: Path, data: dict):
         async with aiofiles.open(file_path, 'w') as f:
@@ -73,38 +107,21 @@ class FileStorageManager:
         await self._async_write_json(self.users_file, users)
 
     async def save_message(self, username: str, avatar: str, content: str, ip_address: str) -> str:
-        messages = await self._async_read_json(self.messages_file)
         timestamp = datetime.now().isoformat()
-        
-        message = {
-            'id': str(uuid.uuid4()),
-            'username': username,
-            'avatar': avatar,
-            'content': content,
-            'timestamp': timestamp,
-            'ip_address': ip_address
-        }
-        
-        messages.append(message)
-        if len(messages) > 1000:
-            messages = messages[-1000:]
-            
-        await self._async_write_json(self.messages_file, messages)
+        msg_id = str(uuid.uuid4())
+        await self.db.save_message(msg_id, username, avatar, content, timestamp, ip_address)
         return timestamp
 
     async def get_recent_messages(self, limit: int = 50, current_ip: str = None) -> list:
-        messages = await self._async_read_json(self.messages_file)
-        recent_messages = messages[-limit:]
-        
+        messages = await self.db.get_recent_messages(limit)
         return [{
             "type": "message",
             "username": msg['username'],
             "avatar": msg['avatar'],
             "content": msg['content'],
             "timestamp": msg['timestamp'],
-            "is_own_message": str(msg['ip_address']) == str(current_ip),
-            "ip_address": msg['ip_address']
-        } for msg in recent_messages]
+            "is_own_message": str(msg['ip_address']) == str(current_ip)
+        } for msg in messages]
 
 class ConnectionManager:
     def __init__(self):
@@ -146,7 +163,6 @@ class ConnectionManager:
                     'type': 'user_left',
                     'username': disconnected_user
                 }, client_id)
-            
             del self.active_connections[client_id]
             logger.info(f"Client {client_id} disconnected")
 
@@ -154,7 +170,6 @@ class ConnectionManager:
         if client_id in self.active_connections:
             connection = self.active_connections[client_id]
             old_username = connection['username']
-            
             connection['username'] = new_username
             connection['avatar'] = new_avatar
             
@@ -167,7 +182,7 @@ class ConnectionManager:
             except Exception as e:
                 logger.error(f"Error updating profile in database: {e}")
                 return
-            
+
             await self._broadcast_to_others({
                 'type': 'user_updated',
                 'old_username': old_username,
@@ -306,7 +321,9 @@ async def init_app():
     storage_path = Path(os.environ.get('STORAGE_PATH', 'data'))
     storage_path.mkdir(exist_ok=True)
     
-    app['connection_manager'] = ConnectionManager()
+    manager = ConnectionManager()
+    await manager.db.init()
+    app['connection_manager'] = manager
     
     app.router.add_get('/', handle_index)
     app.router.add_get('/ws/{client_id}', websocket_handler)
@@ -315,10 +332,6 @@ async def init_app():
 
 def main():
     port = int(os.environ.get('PORT', 8001))
-    
-    storage_path = Path(os.environ.get('STORAGE_PATH', 'data'))
-    storage_path.mkdir(exist_ok=True)
-    
     app = asyncio.run(init_app())
     web.run_app(app, host='0.0.0.0', port=port)
 
