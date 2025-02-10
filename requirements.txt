@@ -1,2 +1,3 @@
-aiohttp==3.9.1
-aiohttp_middlewares==2.2.1
+aiohttp
+aiohttp_middlewares
+aiofiles
