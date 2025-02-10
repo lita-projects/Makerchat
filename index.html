@@ -297,9 +297,6 @@
             avatar: `https://api.dicebear.com/6.x/avataaars/svg?seed=${Date.now()}`
         };
 
-        let storedMessages = JSON.parse(localStorage.getItem('chatMessages')) || [];
-        const MAX_STORED_MESSAGES = 100;
-
         function startKeepAlive() {
             clearInterval(keepAliveInterval);
             keepAliveInterval = setInterval(() => {
@@ -307,11 +304,6 @@
                     ws.send(JSON.stringify({ type: "keep-alive" }));
                 }
             }, KEEP_ALIVE_INTERVAL);
-        }
-
-        function loadStoredMessages() {
-            const messages = JSON.parse(localStorage.getItem('chatMessages')) || [];
-            messages.forEach(msg => handleMessage(msg));
         }
 
         function showNotification(username, message) {
@@ -337,6 +329,7 @@
             const notificationBtn = document.getElementById('notificationBtn');
 
             if (notificationPermission) {
+                // Turn off notifications
                 notificationPermission = false;
                 notificationBtn.textContent = '🔔 Notifications Disabled';
                 return;
@@ -345,6 +338,7 @@
             try {
                 const permission = await Notification.requestPermission();
                 notificationPermission = permission === 'granted';
+                console.log('Notification permission:', permission);
                 notificationBtn.textContent = notificationPermission ? '🔔 Notifications Enabled' : '🔔 Notifications Disabled';
             } catch (error) {
                 console.log('Notification setup error:', error);
@@ -353,6 +347,7 @@
 
         function connect() {
             const clientId = Date.now().toString();
+            console.log('Connecting with ID:', clientId);
             
             const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
             const protocol = isLocalhost ? 'ws://' : 'wss://';
@@ -361,28 +356,30 @@
             ws = new WebSocket(`${protocol}${host}/ws/${clientId}`);
             
             ws.onopen = () => {
-                console.log('Connected to server');
-                enableInterface();
-                startPingInterval();
-                startKeepAlive();
-                loadStoredMessages();
-                
-                if (ws.readyState === WebSocket.OPEN && userData.username && userData.avatar) {
-                    ws.send(JSON.stringify({
-                        type: 'update_profile',
-                        username: userData.username,
-                        avatar: userData.avatar
-                    }));
-                }
-            };
+            console.log('Connected to server');
+            enableInterface();
+            startPingInterval();
+            startKeepAlive();
+            
+            if (ws.readyState === WebSocket.OPEN && userData.username && userData.avatar) {
+                ws.send(JSON.stringify({
+                    type: 'update_profile',
+                    username: userData.username,
+                    avatar: userData.avatar
+                }));
+            }
+        };
             
             ws.onclose = (event) => {
                 console.log('Connection closed:', event.code, event.reason);
                 clearPingInterval();
                 disableInterface();
                 
-                if (++reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                    setTimeout(connect, RECONNECT_DELAY * reconnectAttempts);
+                let currentAttempt = ++reconnectAttempts;
+                console.log(`Reconnecting... Attempt ${currentAttempt} of ${MAX_RECONNECT_ATTEMPTS}`);
+                
+                if (currentAttempt < MAX_RECONNECT_ATTEMPTS) {
+                    setTimeout(connect, RECONNECT_DELAY * currentAttempt);
                 } else {
                     addSystemMessage('Connection lost. Please refresh the page to reconnect.');
                 }
@@ -442,12 +439,6 @@
                     chatContainer.appendChild(messageDiv);
                     chatContainer.scrollTop = chatContainer.scrollHeight;
 
-                    storedMessages.push(data);
-                    if (storedMessages.length > MAX_STORED_MESSAGES) {
-                        storedMessages = storedMessages.slice(-MAX_STORED_MESSAGES);
-                    }
-                    localStorage.setItem('chatMessages', JSON.stringify(storedMessages));
-
                     if (!data.is_own_message) {
                         showNotification(data.username, data.content);
                     }
@@ -460,23 +451,38 @@
             }
         }
 
+        let windowFocused = true;
+
+        window.addEventListener('focus', () => {
+            windowFocused = true;
+        });
+
+        window.addEventListener('blur', () => {
+            windowFocused = false;
+        });
+
         async function sendMessageButton() {
             const messageInput = document.getElementById('messageInput');
-            const content = messageInput.value.trim();
+            const content = messageInput.value;
             
-            if (!content || !ws || ws.readyState !== WebSocket.OPEN) {
-                return;
-            }
+            try {
+                if (!content.trim() || !ws || ws.readyState !== WebSocket.OPEN) {
+                    return;
+                }
 
-            const message = {
-                type: 'message',
-                content: content,
-                timestamp: new Date().toISOString()
-            };
-            
-            ws.send(JSON.stringify(message));
-            messageInput.value = '';
-            adjustTextarea(messageInput);
+                const message = {
+                    type: 'message',
+                    content: content,
+                    timestamp: new Date().toISOString()
+                };
+                
+                ws.send(JSON.stringify(message));
+                messageInput.value = '';
+                adjustTextarea(messageInput);
+            } catch (error) {
+                console.error('Error sending message:', error);
+                addSystemMessage('Failed to send message. Please try again.');
+            }
         }
 
         function handleKeyPress(event) {
@@ -541,11 +547,6 @@
             }
             
             document.getElementById('settingsModal').style.display = 'none';
-        }
-
-        function loadStoredMessages() {
-            const messages = JSON.parse(localStorage.getItem('chatMessages')) || [];
-            messages.forEach(msg => handleMessage(msg));
         }
 
         function enableInterface() {
