@@ -426,29 +426,33 @@
 
             switch(data.type) {
                 case 'message':
-                    const messageDiv = document.createElement('div');
-                    messageDiv.className = `message ${data.is_own_message ? 'own-message' : 'other-message'}`;
-                    messageDiv.innerHTML = `
-                        <img src="${data.avatar}" alt="avatar" class="avatar" onerror="this.src='https://api.dicebear.com/6.x/avataaars/svg?seed=${data.username}'">
-                        <div class="message-content">
-                            <div class="message-header">
-                                <span class="username">${escapeHtml(data.username)}</span>
-                                <span class="timestamp">${new Date(data.timestamp).toLocaleString()}</span>
+                    // Check if message already exists in stored messages
+                    const messageExists = storedMessages.some(msg => msg.id === data.id);
+                    if (!messageExists) {
+                        const messageDiv = document.createElement('div');
+                        messageDiv.className = `message ${data.is_own_message ? 'own-message' : 'other-message'}`;
+                        messageDiv.innerHTML = `
+                            <img src="${data.avatar}" alt="avatar" class="avatar" onerror="this.src='https://api.dicebear.com/6.x/avataaars/svg?seed=${data.username}'">
+                            <div class="message-content">
+                                <div class="message-header">
+                                    <span class="username">${escapeHtml(data.username)}</span>
+                                    <span class="timestamp">${new Date(data.timestamp).toLocaleString()}</span>
+                                </div>
+                                <div class="message-text">${escapeHtml(data.content)}</div>
                             </div>
-                            <div class="message-text">${escapeHtml(data.content)}</div>
-                        </div>
-                    `;
-                    chatContainer.appendChild(messageDiv);
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                        `;
+                        chatContainer.appendChild(messageDiv);
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
 
-                    storedMessages.push(data);
-                    if (storedMessages.length > MAX_STORED_MESSAGES) {
-                        storedMessages = storedMessages.slice(-MAX_STORED_MESSAGES);
-                    }
-                    localStorage.setItem('chatMessages', JSON.stringify(storedMessages));
+                        storedMessages.push(data);
+                        if (storedMessages.length > MAX_STORED_MESSAGES) {
+                            storedMessages = storedMessages.slice(-MAX_STORED_MESSAGES);
+                        }
+                        localStorage.setItem('chatMessages', JSON.stringify(storedMessages));
 
-                    if (!data.is_own_message) {
-                        showNotification(data.username, data.content);
+                        if (!data.is_own_message) {
+                            showNotification(data.username, data.content);
+                        }
                     }
                     break;
                     
@@ -488,44 +492,6 @@
         function adjustTextarea(textarea) {
             textarea.style.height = 'auto';
             textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-        }
-
-        function handleMessage(data) {
-            const chatContainer = document.getElementById('chatContainer');
-
-            switch(data.type) {
-                case 'message':
-                    const messageDiv = document.createElement('div');
-                    messageDiv.className = `message ${data.is_own_message ? 'own-message' : 'other-message'}`;
-                    messageDiv.innerHTML = `
-                        <img src="${data.avatar}" alt="avatar" class="avatar" onerror="this.src='https://api.dicebear.com/6.x/avataaars/svg?seed=${data.username}'">
-                        <div class="message-content">
-                            <div class="message-header">
-                                <span class="username">${escapeHtml(data.username)}</span>
-                                <span class="timestamp">${new Date(data.timestamp).toLocaleString()}</span>
-                            </div>
-                            <div class="message-text">${escapeHtml(data.content)}</div>
-                        </div>
-                    `;
-                    chatContainer.appendChild(messageDiv);
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
-
-                    storedMessages.push(data);
-                    if (storedMessages.length > MAX_STORED_MESSAGES) {
-                        storedMessages = storedMessages.slice(-MAX_STORED_MESSAGES);
-                    }
-                    localStorage.setItem('chatMessages', JSON.stringify(storedMessages));
-
-                    if (!data.is_own_message) {
-                        showNotification(data.username, data.content);
-                    }
-                    break;
-                    
-                case 'user_joined':
-                case 'user_left':
-                    addSystemMessage(`${escapeHtml(data.username)} ${data.type === 'user_joined' ? 'joined' : 'left'} the chat`);
-                    break;
-            }
         }
 
         function addSystemMessage(message) {
