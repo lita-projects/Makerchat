@@ -365,7 +365,6 @@
                 enableInterface();
                 startPingInterval();
                 startKeepAlive();
-                loadStoredMessages();
                 
                 if (ws.readyState === WebSocket.OPEN && userData.username && userData.avatar) {
                     ws.send(JSON.stringify({
